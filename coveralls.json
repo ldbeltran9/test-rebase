@@ -1,0 +1,6 @@
+{
+  "skip_files": [
+      "lib/example_service_web.ex",
+      "lib/example_service.ex"
+  ]
+}

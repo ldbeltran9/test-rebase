@@ -1,0 +1,141 @@
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+name: Common Config Elixir
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/common-config-elixir.yaml
+  repository_dispatch:
+    types:
+      - common-config-elixir
+  schedule:
+    - cron: "8 17 2 * *"
+  workflow_dispatch:
+    inputs:
+      common_config_prerelease:
+        description: "Common Config Prerelease"
+        type: boolean
+        default: false
+        required: false
+
+jobs:
+  Sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.CONFIG_SYNC_APP_ID }}
+          private-key: ${{ secrets.CONFIG_SYNC_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Generate Reader Token
+        id: reader-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 18
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          elixir-version: "1.15"
+          github-token: ${{ steps.reader-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+          otp-version: "26.0"
+
+      - name: Get Sync Ref
+        id: sync-ref
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ steps.reader-token.outputs.token }}
+          result-encoding: string
+          script: |
+            async function verifyOnMain(sha) {
+              const { data } = await github.rest.repos.compareCommits({
+                owner: 'stordco',
+                repo: 'common-config-elixir',
+                base: sha,
+                head: 'main',
+              });
+              // When comparing base=SHA to head=main:
+              // - 'identical': SHA is the tip of main
+              // - 'ahead': main contains SHA as an ancestor
+              // - 'behind': SHA contains commits not on main (invalid)
+              // - 'diverged': SHA and main have diverged (invalid)
+              const isOnMain = data.status === 'identical' || data.status === 'ahead';
+              if (!isOnMain) {
+                throw new Error(
+                  `SHA ${sha} is not on the main branch (compare status: '${data.status}'). ` +
+                  `Only commits that exist on main are allowed.`
+                );
+              }
+              core.info(`Verified SHA ${sha} exists on the main branch (compare status: ${data.status})`);
+            }
+
+            let sha;
+            let source;
+
+            const prerelease = '${{ inputs.common_config_prerelease }}' === 'true';
+            if (prerelease) {
+              const { data: ref } = await github.rest.git.getRef({
+                owner: 'stordco',
+                repo: 'common-config-elixir',
+                ref: 'heads/main',
+              });
+              sha = ref.object.sha;
+              source = 'latest main commit (prerelease)';
+            } else {
+              const { data: release } = await github.rest.repos.getLatestRelease({
+                owner: 'stordco',
+                repo: 'common-config-elixir',
+              });
+              const { data: commit } = await github.rest.repos.getCommit({
+                owner: 'stordco',
+                repo: 'common-config-elixir',
+                ref: release.tag_name,
+              });
+              sha = commit.sha;
+              source = `latest release (${release.tag_name})`;
+            }
+
+            core.info(`Using SHA from ${source}: ${sha}`);
+            await verifyOnMain(sha);
+            return sha;
+
+      - name: Sync
+        uses: stordco/actions-sync@3959c36c54af8981669aaed36278e17b22b638b1 # v1.14.0
+        env:
+          CCE_BUILD_CACHE: ${{ vars.CCE_BUILD_CACHE }}
+        with:
+          commit-message: "chore: sync files with stordco/common-config-elixir"
+          pr-enabled: true
+          pr-labels: common-config
+          pr-title: "chore: sync files with stordco/common-config-elixir"
+          pr-token: ${{ steps.app-token.outputs.token }}
+          sync-auth: x-access-token:${{ steps.reader-token.outputs.token }}
+          sync-tree: ${{ steps.sync-ref.outputs.result }}
+          sync-repository: github.com/stordco/common-config-elixir.git
