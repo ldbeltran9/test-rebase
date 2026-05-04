@@ -1,0 +1,2 @@
+defmodule ExampleServiceEvents do
+end

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+case "$1" in
+  build)
+    docker-compose build app;;
+
+  setup)
+    docker-compose run --rm app bin/setup;;
+
+  start)
+    docker-compose up app;;
+
+  test)
+    shift
+    docker-compose run --rm app mix test "$@";;
+
+  run)
+    shift
+    docker-compose run --rm app "$@";;
+
+  remote)
+    container_id="$(docker ps | grep 'example_service_app' | awk '{print $1}')"
+
+    docker exec -it "$container_id" iex --sname console --cookie monster --remsh example_service@"$container_id";;
+
+  clean)
+    docker-compose down --remove-orphans --volumes;;
+
+  *)
+    echo 'Known commands are: build, setup, start, test, remote, run, clean';;
+esac
+

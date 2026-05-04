@@ -1,0 +1,150 @@
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+name: PR
+
+on:
+  merge_group:
+  pull_request:
+    types:
+      - edited
+      - opened
+      - reopened
+      - synchronize
+
+jobs:
+  Label:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.body != '' }}
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Label
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Support both current versions of the scorecard - the bullet points and the table
+            function determineLabel(description) {
+              const bulletRegex = /Total(?: \(add tag to pr\))?:\s*(\d+)/;
+              const bulletMatch = description.match(bulletRegex);
+
+              const tableRegex = /\|\s*Overall\s*\|\s*(\d+)\s*\|/;
+              const tableMatch = description.match(tableRegex);
+
+              let match = null;
+              let totalScore = null;
+
+              if (bulletMatch != null) {
+                core.debug('Found scorecard total from bullet points: ', bulletMatch);
+                match = bulletMatch;
+              }
+
+              if (tableMatch != null) {
+                core.debug('Found scorecard total from table: ', tableMatch);
+                match = tableMatch;
+              }
+
+              if (match != null && match[1] != null) {
+                totalScore = parseInt(match[1], 10);
+                core.debug('Scorecard total is: ', match[1]);
+              }
+
+              if (totalScore == null) {
+                throw new Error('Unable to determine scorecard total. Please fill out the PR template.');
+              }
+
+              if (totalScore >= 4 && totalScore <= 8) {
+                return 'scorecard: 4-8';
+              } else if (totalScore >= 9 && totalScore <= 12) {
+                return 'scorecard: 9-12';
+              } else if (totalScore >= 13 && totalScore <= 16) {
+                return 'scorecard: 13-16';
+              }
+
+              return null;
+            }
+
+            async function updateLabels(scorecardLabel) {
+              const currentLabels = context.payload.pull_request.labels
+                .map(label => label.name)
+                .sort();
+
+              let newLabels = context.payload.pull_request.labels
+                .filter(label => !label.name.startsWith('scorecard:'))
+                .map(label => label.name);
+
+              if (scorecardLabel != null) {
+                newLabels.push(scorecardLabel);
+              }
+
+              newLabels.sort();
+
+              if (currentLabels === newLabels) {
+                core.debug('Labels are the same, no need to update');
+              } else {
+                core.debug('Setting new labels: ', newLabels);
+                await github.rest.issues.setLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  labels: newLabels
+                });
+              }
+            }
+
+            const prBody = context.payload.pull_request.body
+
+            if (!prBody.match(/\[Calculated deployment score\]/)) {
+              core.notice('PR body does not contain scorecard, skipping', prBody);
+              return null;
+            }
+
+            try {
+              const scorecardLabel = determineLabel(prBody);
+              await updateLabels(scorecardLabel);
+            } catch (err) {
+              core.setFailed(err.message);
+            }
+
+  Title:
+    if: ${{ github.event_name == 'pull_request' }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const title = context.payload?.pull_request?.title;
+
+            if (typeof title !== 'string') {
+              core.info("Pull request data not in payload. Skipping PR title check.");
+              return;
+            }
+
+            const REGEX = /^(feat!|fix!|hotfix!|fix|feat|chore|hotfix|docs|(fix|feat|chore|hotfix|docs)\(\w.*\)):\s(\[\w{1,8}-\d{1,8}\]|.*).*/;
+
+            if (!REGEX.test(title)) {
+              core.setFailed("Pull request title does not follow conventional commits");
+              console.log(`
+            Pull Request title "${title}" does not follow our [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/) naming scheme.
+
+            Please try renaming the PR to match one of these examples:
+
+                chore: a small insignificant change
+                fix: [JIRA-1234] fix an existing feature
+                feat: [JIRA-1234] a new feature to release
+                feat!: a breaking change
+                hotfix: needed in production immediately
+
+            Adding ! (i.e. \`feat!:\`) represents a breaking change and will result in a SemVer major release.
+
+            Starting a commit with \`hotfix\` will result in a separate hotfix release PR.
+                `.trim());
+            }
