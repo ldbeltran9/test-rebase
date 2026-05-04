@@ -1,6 +1,7 @@
 # Example Service
 
 #feature-u changes
+#feature-2 changes
 
 Stord Backend example_service repo.
 
