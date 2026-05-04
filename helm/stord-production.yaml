@@ -1,0 +1,77 @@
+#
+# For documentation about configuration options, please review:
+# > - https://stord-application.stord.engineering/
+#
+
+databases:
+  db:
+    database: example_service
+    instance: stord-production:us-east1:orion-production-master-5ae3638e
+    password: "op://Infrastructure Production/Orion Database/password"
+    port: 5432
+    username: "op://Infrastructure Production/Orion Database/username"
+environment:
+  API_HOST: http://api.stord.com
+  DEPLOY_ENV: production
+  LD_SDK_KEY: "op://Infrastructure Production/Launch Darkly/sdk_key"
+  OTEL_ENDPOINT: http://opentelemetry.stord-monitoring.svc.cluster.local:4318
+  SECRET_KEY_BASE: "create a new secret here"
+image:
+  repository: gcr.io/stord-ci/example-service
+  pullPolicy: Always
+  tag: ${DOCKER_IMAGE_TAG}
+imagePullSecrets:
+  - name: stord-ci-gcr-access-key
+labels:
+  healthcheck-aggregator: "true"
+  tags.datadoghq.com/elixir-version: 1.16.0
+  tags.datadoghq.com/otp-version: 26.2.1
+migration:
+  enabled: true
+  command: migrate
+nameOverride: example-service
+networking:
+  virtualService:
+    http:
+      retries:
+        attempts: 3
+        perTryTimeout: 60s
+        retryOn: gateway-error,connect-failure,refused-stream
+      timeout: 180s
+observability:
+  name: example-service
+  repository: github.com/stordco/example-service
+  environment: production
+probes:
+  liveness:
+    command: ["healthcheck", "alive"]
+    enabled: true
+    failureThreshold: 5
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 5
+  readiness:
+    command: ["healthcheck", "ready"]
+    enabled: true
+    failureThreshold: 5
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    successThreshold: 2
+    timeoutSeconds: 5
+  startup:
+    enabled: false
+    command: ["healthcheck", "alive"]
+replicaCount: 2
+resources:
+  limits:
+    cpu: 1
+    memory: 1Gi
+  requests:
+    cpu: 0.5
+    memory: 512Mi
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: example-service@stord-production.iam.gserviceaccount.com
+  create: true
+startupCommand: ["server"]

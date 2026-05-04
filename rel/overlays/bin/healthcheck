@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+cd -P -- "$(dirname -- "$0")" || exit
+
+exec ./example_service rpc "Healthcheck.${1:-alive}!()"

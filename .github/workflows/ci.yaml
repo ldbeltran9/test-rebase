@@ -1,0 +1,438 @@
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+name: CI
+
+on:
+  merge_group:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+  push:
+    branches:
+      - main
+      - code-freeze/**
+  workflow_call:
+    secrets:
+      CI_SERVICE_KEY:
+        required: true
+      READER_APP_ID:
+        required: true
+      READER_APP_PRIVATE_KEY:
+        required: true
+      GOOGLE_WORKLOAD_IDENTITY_PROVIDER:
+        required: true
+      HEX_API_KEY:
+        required: true
+      OP_SERVICE_ACCOUNT_TOKEN:
+        required: true
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Changed:
+    name: Changed Files
+    runs-on: ubuntu-latest
+
+    outputs:
+      config: ${{ steps.changed.outputs.config }}
+      database: ${{ steps.changed.outputs.database }}
+      docker: ${{ steps.changed.outputs.docker }}
+      # Note: temporarily disabling documentation/OpenAPI validation in CI until a long term solution is found
+      # documentation: ${{ steps.changed.outputs.documentation }}
+      elixir: ${{ steps.changed.outputs.elixir }}
+      helm: ${{ steps.changed.outputs.helm }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+
+      - id: changed
+        name: Get Changed Files
+        run: |
+          # Using fetch-depth 2 above, we should always be able to get the full list of changed files:
+          # - In a pull-request, GHA merges the PR branch into main
+          # - When pushed to main, we always squash merge, so there is only one new commit
+
+          CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD)
+
+          declare -A patterns
+          patterns["config"]=".github/workflows/ci.yaml .github/scripts/validate-config.sh config/.* helm/.*"
+          patterns["database"]=".github/workflows/ci.yaml priv/.*repo/.*"
+          patterns["docker"]=".github/workflows/ci.yaml Dockerfile"
+          patterns["documentation"]="docs/.* priv/documentation/.* .*.ex .*.md"
+          patterns["elixir"]=".github/workflows/ci.yaml .tool-versions mix.lock priv/.* .*.ex .*.exs .*.heex"
+          patterns["helm"]=".github/workflows/ci.yaml .github/workflows/staging.yaml .github/workflows/production.yaml helm/.*"
+
+          for filetype in ${!patterns[@]}; do
+            found="false"
+            echo "==> Checking: $filetype"
+            for pattern in ${patterns[$filetype]}; do
+              for changed_file in $CHANGED_FILES; do
+                if [[ "$changed_file" =~ $pattern ]]; then
+                  echo "====> Found change: $changed_file"
+                  found="true"
+                  break
+                fi
+              done
+              if [[ "$found" == "true" ]]; then
+                break
+              fi
+            done
+            echo "$filetype=$found" >> $GITHUB_OUTPUT
+          done
+
+  Credo:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.elixir == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Credo
+        run: mix credo --strict
+
+  Dependencies:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.elixir == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Unused
+        run: mix deps.unlock --check-unused
+
+  Dialyzer:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.elixir == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Dialyzer
+        run: mix dialyzer --format github
+
+  Docker:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && (needs.Changed.outputs.docker == 'true' || vars.CCE_BUILD_RETAG != '') }}
+    needs: [Changed]
+
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - id: gcp
+        name: Login (GCP)
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
+        with:
+          token_format: access_token
+          service_account: github@stord-ci.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Login (GCR)
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: gcr.io
+          username: oauth2accesstoken
+          password: ${{ steps.gcp.outputs.access_token }}
+
+      - name: Docker Build
+        uses: stordco/actions-elixir/docker-build@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+  Documentation:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.documentation == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Docs
+        run: mix docs --warnings-as-errors
+
+  Format:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.elixir == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Format
+        run: mix format --check-formatted
+
+  Seed:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.database == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+
+    services:
+      postgres:
+        image: postgres:14.7-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: "--nosync"
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Seed
+        run: mix ecto.setup
+
+  Test:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.elixir == 'true' }}
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+
+    services:
+      postgres:
+        image: postgres:14.7-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: "--nosync"
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Compile
+        run: mix compile --warnings-as-errors
+
+      - name: Test
+        run: mix coveralls.json --warnings-as-errors
+
+      - name: Upload coveralls artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-artifacts
+          path: cover/excoveralls.json
+          retention-days: 1
+
+  Coveralls:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.elixir == 'true' }}
+    needs: [Changed, Test]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Coverall Artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-artifacts
+          path: cover
+
+      - name: Coveralls
+        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e # v2.3.7
+        with:
+          file: cover/excoveralls.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+
+  Validate_Config:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.config == 'true' }}
+    name: Validate Config
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 2
+
+      - name: Validate Config
+        run: |
+          .github/scripts/validate-config.sh
+
+  Validate_Secrets:
+    if: ${{ !startsWith(github.head_ref, 'release-please--branches') && needs.Changed.outputs.helm == 'true' }}
+    name: Validate Secrets
+    needs: [Changed]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+
+      - name: Install 1Password CLI
+        uses: 1password/install-cli-action@143a85f84a90555d121cde2ff5872e393a47ab9f # v1.0.0
+
+      - name: Validate Secrets
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        run: |
+          .github/scripts/validate-secrets.sh
