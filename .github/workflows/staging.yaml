@@ -1,0 +1,276 @@
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+name: Staging
+
+on:
+  push:
+    branches:
+      - main
+      - code-freeze/**
+  workflow_dispatch:
+    inputs:
+      helm_chart_prerelease:
+        default: false
+        description: "Helm Chart Prerelease"
+        required: false
+        type: boolean
+      helm_chart_version:
+        default: "~>5"
+        description: "Helm Chart Version"
+        required: false
+        type: string
+      twingate_disabled:
+        default: false
+        description: "Disable Twingate connection"
+        required: false
+        type: boolean
+
+concurrency:
+  group: Staging
+
+jobs:
+  Docker:
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      tag: ${{ steps.build.outputs.tag }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - id: gcp
+        name: Login (GCP)
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
+        with:
+          token_format: access_token
+          service_account: github@stord-ci.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Login (GCR)
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: gcr.io
+          username: oauth2accesstoken
+          password: ${{ steps.gcp.outputs.access_token }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Docker Build
+        id: build
+        uses: stordco/actions-elixir/docker-build@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          push: true
+          cache-type: ${{ vars.CCE_CACHE_TYPE || 'gha' }}
+          images: gcr.io/stord-ci/example-service
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+  Documentation:
+    environment:
+      name: Documentation
+      url: https://example-service.stord.engineering
+
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
+
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Elixir
+        uses: stordco/actions-elixir/setup@e125c9eecde83437728201927fd1d7516cb6cee7 # v1.5.4
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          hex-token: ${{ secrets.HEX_API_KEY }}
+          oban-fingerprint: ${{ secrets.OBAN_KEY_FINGERPRINT }}
+          oban-token: ${{ secrets.OBAN_LICENSE_KEY }}
+
+      - name: Docs
+        run: mix docs
+
+      - name: Set CNAME
+        run: echo "example-service.stord.engineering" > ./doc/CNAME
+
+      - name: Upload Artifacts
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: ./doc
+
+      - name: Deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+  Kubernetes:
+    environment:
+      name: Staging
+
+    name: Kubernetes (${{ matrix.cluster }})
+
+    needs: [Docker]
+
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.READER_APP_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set Helm Release Name and Chart Values
+        id: helm-metadata
+        run: |
+          if [ -z "${{ matrix.helm_release_name }}" ]; then
+            RELEASE_NAME=example-service
+            echo "helm-release-name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "helm-release-name=${{ matrix.helm_release_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -z "${{ matrix.helm_chart_values }}" ]; then
+            HELM_CHART_VALUES=${{ matrix.project }}
+            echo "helm-chart-values=$HELM_CHART_VALUES" >> "$GITHUB_OUTPUT"
+          else
+            echo "helm-chart-values=${{ matrix.helm_chart_values }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: gcp
+        name: Login (GCP)
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
+        with:
+          token_format: access_token
+          service_account: ${{ format('github@{0}.iam.gserviceaccount.com', matrix.project) }}
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Connect (Twingate)
+        if: ${{ vars.TWINGATE_ENABLED != 'false' && !inputs.twingate_disabled }}
+        uses: Twingate/github-action@06732f4c859ec7a435a953428d49588a77133bd6 # v1.7
+        with:
+          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+
+      - name: Install gke-gcloud-auth-plugin and prerequisites
+        run: |
+          curl -sSLf https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+          sudo apt-get update && sudo apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin
+
+      - name: Login (Kubernetes Cluster)
+        uses: google-github-actions/get-gke-credentials@9025e8f90f2d8e0c3dafc3128cc705a26d992a6a # v2.3.0
+        with:
+          cluster_name: ${{ matrix.cluster }}
+          location: ${{ matrix.region }}
+          project_id: ${{ matrix.project }}
+
+      - name: Login (GHCR)
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ghcr.io -u stordco --password-stdin
+
+      - name: Get Helm Chart
+        if: ${{ inputs.helm_chart_prerelease }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: stord-application
+          repository: stordco/stord-application
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Helm Upgrade (${{ steps.helm-metadata.outputs.helm-release-name }})
+        id: helm-upgrade
+        uses: stordco/actions-helm@d3ec651c65c1acbb5a98b8e40edfadfb5f37f4d2 # v0.1.6
+        with:
+          args: >-
+            --atomic
+            --cleanup-on-fail
+            --install
+            --timeout 600s
+            --version ${{ inputs.helm_chart_version || '~>5' }}
+            --wait
+          chart: ${{ inputs.helm_chart_prerelease && 'stord-application' || 'oci://ghcr.io/stordco/helm/stord-application' }}
+          cluster: ${{ matrix.cluster }}
+          command: upgrade
+          name: ${{ steps.helm-metadata.outputs.helm-release-name }}
+          namespace: ${{ matrix.namespace }}
+          values_files: >-
+            helm/${{ matrix.project }}.yaml
+            helm/${{ steps.helm-metadata.outputs.helm-chart-values }}.yaml
+            helm/${{ matrix.namespace }}.yaml
+          values_inline: |
+            appVersion: '${{ needs.Docker.outputs.tag }}'
+            image:
+              tag: '${{ needs.Docker.outputs.tag }}'
+              repository: '${{ needs.Docker.outputs.image }}'
+            nameOverride: '${{ steps.helm-metadata.outputs.helm-release-name }}'
+            observability:
+              commit: "${{ github.sha }}"
+              version: "${{ needs.Docker.outputs.tag }}"
+
+      - name: Send Helm upgrade failure notification if CHANNEL_ID is set
+        if: ${{ failure() && steps.helm-upgrade.conclusion == 'failure' && vars.CHANNEL_ID != '' }}
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload-templated: true
+          payload: |
+            channel: ${{ vars.CHANNEL_ID }}
+            text: ":alert: *Helm upgrade failed* on release `${{ steps.helm-metadata.outputs.helm-release-name }}` in `Staging`."
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: ":alert: *Helm upgrade failed* on release `${{ steps.helm-metadata.outputs.helm-release-name }}` in `Staging`."
+              - type: section
+                fields:
+                  - type: mrkdwn
+                    text: "*Repository:*\n`${{ github.repository }}`"
+                  - type: mrkdwn
+                    text: "*Release Tag:*\n`${{ needs.Docker.outputs.tag }}`"
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
+
+    strategy:
+      matrix:
+        include: ${{ fromJSON(vars.OMS_STAGING_GKE) }}
+

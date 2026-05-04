@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+cd -P -- "$(dirname -- "$0")" || exit
+
+GRPC_SERVER=false KAFKA_CONSUMER=false KAFKA_PRODUCER=false PHX_SERVER=false exec ./example_service eval "ExampleService.Release.seed"

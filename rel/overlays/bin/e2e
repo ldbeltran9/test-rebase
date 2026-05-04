@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# This file is synced with stordco/common-config-elixir. Any changes will be overwritten.
+
+cd -P -- "$(dirname -- "$0")" || exit
+
+# Use below file to run additional eval functions, such as setting up kafka topics, for the e2e environment.
+# expected layout of the file will be the same as the migrate / seed files.
+if [[ -f "./e2e-setup" ]]; then
+  # make sure you chmod +x this file!
+  ./e2e-setup
+  sleep 5
+fi
+
+./migrate
+sleep 5
+./seed
+sleep 5
+exec ./server

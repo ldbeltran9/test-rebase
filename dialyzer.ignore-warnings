@@ -1,0 +1,2 @@
+Function call/2 has no local return
+The variable _@10 can never match since previous clauses completely covered the type 'error'
